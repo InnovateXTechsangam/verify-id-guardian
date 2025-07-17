@@ -180,29 +180,44 @@ const DocumentVerification = () => {
     setOcrProgress(0);
 
     try {
+      console.log('Starting OCR processing for:', file.name);
+      
       const worker = await createWorker('eng', 1, {
         logger: (m: any) => {
+          console.log('OCR Progress:', m);
           if (m.status === 'recognizing text') {
             setOcrProgress(Math.round(m.progress * 100));
           }
         }
       });
       
-      const { data: { text } } = await worker.recognize(file);
+      const { data: { text, confidence } } = await worker.recognize(file);
+      console.log('OCR Result:', { text, confidence });
 
       // Extract data based on document type
       const extractedData = extractDataFromOCR(text, documentType);
+      console.log('Extracted data:', extractedData);
       
-      // Update form data with extracted information
-      setFormData(prev => ({ ...prev, ...extractedData }));
+      // Check if any data was extracted
+      const hasExtractedData = Object.keys(extractedData).length > 0;
+      
+      if (hasExtractedData) {
+        // Update form data with extracted information
+        setFormData(prev => ({ ...prev, ...extractedData }));
+        toast({
+          title: "OCR Processing Complete",
+          description: `Successfully extracted ${Object.keys(extractedData).length} fields from document`,
+          variant: "default"
+        });
+      } else {
+        toast({
+          title: "No Data Extracted",
+          description: "Could not automatically extract data. Please ensure document is clear and try again, or enter details manually.",
+          variant: "destructive"
+        });
+      }
 
       await worker.terminate();
-
-      toast({
-        title: "OCR Processing Complete",
-        description: "Document data extracted and filled in the form",
-        variant: "default"
-      });
 
     } catch (error) {
       console.error('OCR processing failed:', error);
@@ -219,28 +234,54 @@ const DocumentVerification = () => {
 
   const extractDataFromOCR = (text: string, docType: DocumentType) => {
     const extractedData: Record<string, string> = {};
-    const upperText = text.toUpperCase();
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+    console.log('OCR Text Lines:', lines);
 
     if (docType === 'aadhar') {
-      // Extract Aadhar number (12 digits)
-      const aadharMatch = text.match(/\b\d{4}\s?\d{4}\s?\d{4}\b/);
-      if (aadharMatch) {
-        extractedData.aadharNumber = formatAadharNumber(aadharMatch[0]);
+      // Extract Aadhar number (12 digits, with or without spaces)
+      const aadharPatterns = [
+        /\b\d{4}\s?\d{4}\s?\d{4}\b/g,
+        /(?:aadhar|aadhaar|uid)[:\s#]*(\d{4}\s?\d{4}\s?\d{4})/gi,
+        /(\d{4}\s\d{4}\s\d{4})/g
+      ];
+      
+      for (const pattern of aadharPatterns) {
+        const matches = text.match(pattern);
+        if (matches) {
+          extractedData.aadharNumber = formatAadharNumber(matches[0]);
+          break;
+        }
       }
 
-      // Extract DOB (various formats)
-      const dobMatch = text.match(/\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b/);
-      if (dobMatch) {
-        extractedData.dob = dobMatch[1].replace(/\//g, '-');
+      // Extract Name - look for various patterns
+      const namePatterns = [
+        /(?:name|नाम)[:\s]*([A-Za-z\s]{3,50})/gi,
+        /^([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*$/gm
+      ];
+      
+      for (const pattern of namePatterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].trim().length > 2) {
+          extractedData.fullName = match[1].trim();
+          break;
+        }
       }
 
-      // Extract name (typically after "Name:" or similar)
-      const nameMatch = text.match(/(?:Name|नाम)[:\s]*([A-Za-z\s]+)/i);
-      if (nameMatch) {
-        extractedData.fullName = nameMatch[1].trim();
+      // Extract DOB - multiple date formats
+      const dobPatterns = [
+        /(?:dob|birth|जन्म)[:\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/gi,
+        /\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})\b/g
+      ];
+      
+      for (const pattern of dobPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          extractedData.dob = match[1].replace(/[\/\.]/g, '-');
+          break;
+        }
       }
 
-      // Extract pincode
+      // Extract pincode - 6 digit number
       const pincodeMatch = text.match(/\b\d{6}\b/);
       if (pincodeMatch) {
         extractedData.pincode = pincodeMatch[0];
@@ -249,65 +290,170 @@ const DocumentVerification = () => {
 
     if (docType === 'pan') {
       // Extract PAN number (format: ABCDE1234F)
-      const panMatch = text.match(/\b[A-Z]{5}\d{4}[A-Z]\b/);
-      if (panMatch) {
-        extractedData.panNumber = panMatch[0];
+      const panPatterns = [
+        /\b[A-Z]{5}\d{4}[A-Z]\b/g,
+        /(?:pan)[:\s#]*([A-Z]{5}\d{4}[A-Z])/gi
+      ];
+      
+      for (const pattern of panPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          extractedData.panNumber = match[0].replace(/[^A-Z0-9]/g, '');
+          break;
+        }
       }
 
       // Extract name
-      const nameMatch = text.match(/(?:Name|नाम)[:\s]*([A-Za-z\s]+)/i);
-      if (nameMatch) {
-        extractedData.fullName = nameMatch[1].trim();
+      const namePatterns = [
+        /(?:name|नाम)[:\s]*([A-Za-z\s]{3,50})/gi,
+        /^([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*$/gm
+      ];
+      
+      for (const pattern of namePatterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].trim().length > 2) {
+          extractedData.fullName = match[1].trim();
+          break;
+        }
       }
 
       // Extract father's name
-      const fatherMatch = text.match(/(?:Father|पिता|Father's Name)[:\s]*([A-Za-z\s]+)/i);
-      if (fatherMatch) {
-        extractedData.fatherName = fatherMatch[1].trim();
+      const fatherPatterns = [
+        /(?:father|पिता|father's\s+name)[:\s]*([A-Za-z\s]{3,50})/gi,
+        /(?:s\/o|son\s+of)[:\s]*([A-Za-z\s]{3,50})/gi
+      ];
+      
+      for (const pattern of fatherPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].trim().length > 2) {
+          extractedData.fatherName = match[1].trim();
+          break;
+        }
       }
 
       // Extract DOB
-      const dobMatch = text.match(/\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b/);
-      if (dobMatch) {
-        extractedData.dob = dobMatch[1].replace(/\//g, '-');
+      const dobPatterns = [
+        /(?:dob|birth|जन्म)[:\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/gi,
+        /\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})\b/g
+      ];
+      
+      for (const pattern of dobPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          extractedData.dob = match[1].replace(/[\/\.]/g, '-');
+          break;
+        }
       }
     }
 
     if (docType === 'marksheet') {
       // Extract roll number
-      const rollMatch = text.match(/(?:Roll|रोल)[:\s]*(\w+)/i);
-      if (rollMatch) {
-        extractedData.rollNumber = rollMatch[1];
+      const rollPatterns = [
+        /(?:roll|रोल)[:\s#]*(\w+)/gi,
+        /(?:roll\s+no|roll\s+number)[:\s]*(\w+)/gi
+      ];
+      
+      for (const pattern of rollPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          extractedData.rollNumber = match[1].trim();
+          break;
+        }
       }
 
       // Extract student name
-      const nameMatch = text.match(/(?:Name|नाम|Student)[:\s]*([A-Za-z\s]+)/i);
-      if (nameMatch) {
-        extractedData.studentName = nameMatch[1].trim();
+      const namePatterns = [
+        /(?:name|नाम|student)[:\s]*([A-Za-z\s]{3,50})/gi,
+        /(?:candidate\s+name)[:\s]*([A-Za-z\s]{3,50})/gi
+      ];
+      
+      for (const pattern of namePatterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].trim().length > 2) {
+          extractedData.studentName = match[1].trim();
+          break;
+        }
       }
 
       // Extract school name
-      const schoolMatch = text.match(/(?:School|विद्यालय)[:\s]*([A-Za-z\s]+)/i);
-      if (schoolMatch) {
-        extractedData.schoolName = schoolMatch[1].trim();
+      const schoolPatterns = [
+        /(?:school|विद्यालय|institution)[:\s]*([A-Za-z\s]{5,100})/gi,
+        /(?:issued\s+by)[:\s]*([A-Za-z\s]{5,100})/gi
+      ];
+      
+      for (const pattern of schoolPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].trim().length > 4) {
+          extractedData.schoolName = match[1].trim();
+          break;
+        }
+      }
+
+      // Extract board
+      const boardPatterns = [
+        /\b(CBSE|ICSE|STATE|BOARD)\b/gi,
+        /(?:board)[:\s]*([A-Za-z\s]{3,30})/gi
+      ];
+      
+      for (const pattern of boardPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          extractedData.board = match[0].trim();
+          break;
+        }
+      }
+
+      // Extract class
+      const classPatterns = [
+        /\b(10th|12th|tenth|twelfth|X|XII)\b/gi,
+        /(?:class)[:\s]*(10th|12th|X|XII)/gi
+      ];
+      
+      for (const pattern of classPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          extractedData.class = match[0].trim();
+          break;
+        }
       }
 
       // Extract year
-      const yearMatch = text.match(/\b(20\d{2})\b/);
-      if (yearMatch) {
-        extractedData.passingYear = yearMatch[1];
+      const yearPatterns = [
+        /\b(20\d{2})\b/g,
+        /(?:year|passing)[:\s]*(20\d{2})/gi
+      ];
+      
+      for (const pattern of yearPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          extractedData.passingYear = match[1] || match[0];
+          break;
+        }
       }
 
       // Extract percentage/CGPA
-      const percentageMatch = text.match(/(\d+\.?\d*)\s*%/);
-      const cgpaMatch = text.match(/(\d+\.?\d*)\s*CGPA/i);
-      if (percentageMatch) {
-        extractedData.percentage = percentageMatch[1] + '%';
-      } else if (cgpaMatch) {
-        extractedData.percentage = cgpaMatch[1] + ' CGPA';
+      const percentagePatterns = [
+        /(\d+\.?\d*)\s*%/g,
+        /(\d+\.?\d*)\s*(percent|percentage)/gi,
+        /(\d+\.?\d*)\s*CGPA/gi,
+        /(?:percentage|marks)[:\s]*(\d+\.?\d*)/gi
+      ];
+      
+      for (const pattern of percentagePatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          const value = match[1];
+          if (pattern.source.includes('CGPA')) {
+            extractedData.percentage = value + ' CGPA';
+          } else {
+            extractedData.percentage = value + '%';
+          }
+          break;
+        }
       }
     }
 
+    console.log('Final extracted data:', extractedData);
     return extractedData;
   };
 

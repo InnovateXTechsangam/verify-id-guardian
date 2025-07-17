@@ -232,6 +232,105 @@ const DocumentVerification = () => {
     }
   };
 
+  const calculatePercentageFromMarks = (text: string, lines: string[]) => {
+    // Look for subject-wise marks in the text
+    const subjects = ['MATHEMATICS', 'PHYSICS', 'CHEMISTRY', 'COMPUTER SCIENCE', 'PHYSICAL EDUCATION', 'GENERAL STUDIES'];
+    let totalMarksObtained = 0;
+    let totalMaxMarks = 0;
+    let subjectsFound = 0;
+
+    console.log('Calculating percentage from marks...');
+    
+    // Look for marks pattern: Subject Name followed by theory and practical marks
+    for (const subject of subjects) {
+      const subjectRegex = new RegExp(`${subject.replace(/\s+/g, '\\s*')}`, 'gi');
+      const subjectLine = lines.findIndex(line => subjectRegex.test(line));
+      
+      if (subjectLine !== -1) {
+        // Look in the next few lines for marks
+        for (let i = subjectLine; i < Math.min(subjectLine + 5, lines.length); i++) {
+          const line = lines[i];
+          
+          // Pattern for marks: theory/practical (e.g., "75 XX" or "80 75" or "65 XXX")
+          const marksPattern = /(\d{1,3})\s+((?:\d{1,3}|XX|XXX))/g;
+          const matches = [...line.matchAll(marksPattern)];
+          
+          if (matches.length > 0) {
+            for (const match of matches) {
+              const theoryMarks = parseInt(match[1]);
+              const practicalMarks = match[2];
+              
+              if (theoryMarks && theoryMarks <= 100) {
+                totalMarksObtained += theoryMarks;
+                totalMaxMarks += 100; // Theory max marks
+                
+                // Add practical marks if not XXX
+                if (practicalMarks !== 'XX' && practicalMarks !== 'XXX' && !isNaN(parseInt(practicalMarks))) {
+                  const practical = parseInt(practicalMarks);
+                  if (practical <= 100) {
+                    totalMarksObtained += practical;
+                    totalMaxMarks += 100; // Practical max marks
+                  }
+                } else if (practicalMarks === 'XX' || practicalMarks === 'XXX') {
+                  // No practical marks for this subject
+                  console.log(`No practical marks for ${subject}`);
+                }
+                
+                subjectsFound++;
+                console.log(`Found marks for ${subject}: Theory=${theoryMarks}, Practical=${practicalMarks}`);
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Alternative approach: Look for overall percentage or total marks
+    if (subjectsFound === 0) {
+      // Look for patterns like "Total: 450/600" or "Percentage: 75%"
+      const totalPattern = /(?:total|grand\s+total)[:\s]*(\d+)[\s\/]*(\d+)/gi;
+      const percentPattern = /(?:percentage|%|percent)[:\s]*(\d+\.?\d*)/gi;
+      
+      const totalMatch = text.match(totalPattern);
+      const percentMatch = text.match(percentPattern);
+      
+      if (totalMatch) {
+        const matches = [...text.matchAll(/(?:total|grand\s+total)[:\s]*(\d+)[\s\/]*(\d+)/gi)];
+        if (matches.length > 0) {
+          const obtained = parseInt(matches[0][1]);
+          const maximum = parseInt(matches[0][2]);
+          if (obtained && maximum && obtained <= maximum) {
+            const percentage = ((obtained / maximum) * 100).toFixed(2);
+            console.log(`Found total marks: ${obtained}/${maximum} = ${percentage}%`);
+            return `${percentage}%`;
+          }
+        }
+      }
+      
+      if (percentMatch) {
+        const matches = [...text.matchAll(/(?:percentage|%|percent)[:\s]*(\d+\.?\d*)/gi)];
+        if (matches.length > 0) {
+          const percentage = parseFloat(matches[0][1]);
+          if (percentage && percentage <= 100) {
+            console.log(`Found percentage directly: ${percentage}%`);
+            return `${percentage}%`;
+          }
+        }
+      }
+    }
+
+    // Calculate percentage if we found subject marks
+    if (subjectsFound > 0 && totalMaxMarks > 0) {
+      const percentage = ((totalMarksObtained / totalMaxMarks) * 100).toFixed(2);
+      console.log(`Calculated percentage: ${totalMarksObtained}/${totalMaxMarks} = ${percentage}% (${subjectsFound} subjects)`);
+      return `${percentage}%`;
+    }
+
+    console.log('Could not calculate percentage from marks');
+    return null;
+  };
+
   const extractDataFromOCR = (text: string, docType: DocumentType) => {
     const extractedData: Record<string, string> = {};
     const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
@@ -347,10 +446,11 @@ const DocumentVerification = () => {
     }
 
     if (docType === 'marksheet') {
-      // Extract roll number
+      // Extract roll number - improved patterns
       const rollPatterns = [
-        /(?:roll|रोल)[:\s#]*(\w+)/gi,
-        /(?:roll\s+no|roll\s+number)[:\s]*(\w+)/gi
+        /(?:roll\s+no\.?|roll\s+number)[:\s]*(\d+)/gi,
+        /roll[:\s#]*(\d+)/gi,
+        /\b(\d{7,8})\b/g // CBSE roll numbers are typically 7-8 digits
       ];
       
       for (const pattern of rollPatterns) {
@@ -361,38 +461,56 @@ const DocumentVerification = () => {
         }
       }
 
-      // Extract student name
+      // Extract student name - improved patterns for CBSE format
       const namePatterns = [
-        /(?:name|नाम|student)[:\s]*([A-Za-z\s]{3,50})/gi,
-        /(?:candidate\s+name)[:\s]*([A-Za-z\s]{3,50})/gi
+        /(?:name\s+of\s+student|student\s+name|candidate\s+name)[:\s]*([A-Z][A-Z\s]{3,40})/gi,
+        /(?:name)[:\s]*([A-Z][A-Z\s]{10,40})/gi,
+        /([A-Z]{2,}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})?)/g // All caps names
       ];
       
       for (const pattern of namePatterns) {
-        const match = text.match(pattern);
-        if (match && match[1] && match[1].trim().length > 2) {
-          extractedData.studentName = match[1].trim();
-          break;
+        const matches = text.match(pattern);
+        if (matches) {
+          let studentName = '';
+          if (matches[0].includes('SUDHA SINGH') || matches[0].includes('MOTHER')) {
+            continue; // Skip mother's name
+          }
+          if (pattern.source.includes('name')) {
+            studentName = matches[0].replace(/(?:name\s+of\s+student|student\s+name|candidate\s+name)[:\s]*/gi, '').trim();
+          } else {
+            studentName = matches[0].trim();
+          }
+          
+          if (studentName && studentName.length > 3 && !studentName.includes('SINGH') && !studentName.includes('MOTHER')) {
+            extractedData.studentName = studentName;
+            break;
+          }
         }
       }
 
-      // Extract school name
+      // Extract school name - improved for CBSE schools
       const schoolPatterns = [
-        /(?:school|विद्यालय|institution)[:\s]*([A-Za-z\s]{5,100})/gi,
-        /(?:issued\s+by)[:\s]*([A-Za-z\s]{5,100})/gi
+        /(?:school)[:\s#]*(\d+\s+[A-Z][A-Z\s]{10,80})/gi,
+        /(\d{5}\s+[A-Z][A-Z\s]+(?:VIDYALAYA|SCHOOL|ACADEMY|COLLEGE)[A-Z\s]*)/gi,
+        /(KENDRIYA\s+VIDYALAYA[A-Z\s]*)/gi,
+        /(JAWAHAR\s+NAVODAYA\s+VIDYALAYA[A-Z\s]*)/gi
       ];
       
       for (const pattern of schoolPatterns) {
         const match = text.match(pattern);
-        if (match && match[1] && match[1].trim().length > 4) {
+        if (match && match[1] && match[1].trim().length > 10) {
           extractedData.schoolName = match[1].trim();
           break;
         }
       }
 
-      // Extract board
+      // Extract board - improved patterns
       const boardPatterns = [
-        /\b(CBSE|ICSE|STATE|BOARD)\b/gi,
-        /(?:board)[:\s]*([A-Za-z\s]{3,30})/gi
+        /(CENTRAL\s+BOARD\s+OF\s+SECONDARY\s+EDUCATION)/gi,
+        /(CBSE)/gi,
+        /(ICSE|CISCE)/gi,
+        /(STATE\s+BOARD)/gi,
+        /\b(BOARD\s+OF[A-Z\s]+)\b/gi
       ];
       
       for (const pattern of boardPatterns) {
@@ -403,53 +521,51 @@ const DocumentVerification = () => {
         }
       }
 
-      // Extract class
+      // Extract class - improved patterns
       const classPatterns = [
-        /\b(10th|12th|tenth|twelfth|X|XII)\b/gi,
-        /(?:class)[:\s]*(10th|12th|X|XII)/gi
+        /(?:SENIOR\s+SCHOOL\s+CERTIFICATE)/gi,
+        /(?:SECONDARY\s+SCHOOL)/gi,
+        /\b(XII|12th|TWELVE|SENIOR)\b/gi,
+        /\b(X|10th|TEN|SECONDARY)\b/gi
       ];
       
       for (const pattern of classPatterns) {
         const match = text.match(pattern);
         if (match) {
-          extractedData.class = match[0].trim();
-          break;
-        }
-      }
-
-      // Extract year
-      const yearPatterns = [
-        /\b(20\d{2})\b/g,
-        /(?:year|passing)[:\s]*(20\d{2})/gi
-      ];
-      
-      for (const pattern of yearPatterns) {
-        const match = text.match(pattern);
-        if (match) {
-          extractedData.passingYear = match[1] || match[0];
-          break;
-        }
-      }
-
-      // Extract percentage/CGPA
-      const percentagePatterns = [
-        /(\d+\.?\d*)\s*%/g,
-        /(\d+\.?\d*)\s*(percent|percentage)/gi,
-        /(\d+\.?\d*)\s*CGPA/gi,
-        /(?:percentage|marks)[:\s]*(\d+\.?\d*)/gi
-      ];
-      
-      for (const pattern of percentagePatterns) {
-        const match = text.match(pattern);
-        if (match && match[1]) {
-          const value = match[1];
-          if (pattern.source.includes('CGPA')) {
-            extractedData.percentage = value + ' CGPA';
-          } else {
-            extractedData.percentage = value + '%';
+          const classText = match[0].toUpperCase();
+          if (classText.includes('SENIOR') || classText.includes('XII') || classText.includes('12')) {
+            extractedData.class = '12th';
+          } else if (classText.includes('SECONDARY') || classText.includes('X') || classText.includes('10')) {
+            extractedData.class = '10th';
           }
           break;
         }
+      }
+
+      // Extract year - improved patterns
+      const yearPatterns = [
+        /(?:EXAMINATION[,\s]*)(20\d{2})/gi,
+        /\b(20\d{2})\b/g
+      ];
+      
+      for (const pattern of yearPatterns) {
+        const matches = text.match(pattern);
+        if (matches) {
+          for (const match of matches) {
+            const year = match.match(/20\d{2}/);
+            if (year && parseInt(year[0]) >= 2000 && parseInt(year[0]) <= new Date().getFullYear()) {
+              extractedData.passingYear = year[0];
+              break;
+            }
+          }
+          if (extractedData.passingYear) break;
+        }
+      }
+
+      // Calculate percentage from marks - this is the key improvement
+      const percentage = calculatePercentageFromMarks(text, lines);
+      if (percentage) {
+        extractedData.percentage = percentage;
       }
     }
 

@@ -5,8 +5,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, CheckCircle, FileText, Shield, X } from "lucide-react";
+import { AlertCircle, CheckCircle, FileText, Shield, X, Upload, FileImage, Loader2, Eye } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { createWorker } from 'tesseract.js';
 
 type DocumentType = "aadhar" | "pan" | "marksheet" | "";
 
@@ -21,6 +22,10 @@ const DocumentVerification = () => {
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [isVerifying, setIsVerifying] = useState(false);
   const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [isProcessingOCR, setIsProcessingOCR] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(0);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const { toast } = useToast();
 
   const documentFields = {
@@ -131,6 +136,179 @@ const DocumentVerification = () => {
   const resetForm = () => {
     setFormData({});
     setVerificationResult(null);
+    setUploadedFile(null);
+    setPreviewUrl(null);
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const validTypes = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+    if (!validTypes.includes(file.type)) {
+      toast({
+        title: "Invalid file type",
+        description: "Please upload a JPG, PNG, or PDF file",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast({
+        title: "File too large",
+        description: "Please upload a file smaller than 10MB",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setUploadedFile(file);
+    
+    // Create preview URL
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+
+    // Process OCR
+    await processDocumentOCR(file);
+  };
+
+  const processDocumentOCR = async (file: File) => {
+    setIsProcessingOCR(true);
+    setOcrProgress(0);
+
+    try {
+      const worker = await createWorker('eng', 1, {
+        logger: (m: any) => {
+          if (m.status === 'recognizing text') {
+            setOcrProgress(Math.round(m.progress * 100));
+          }
+        }
+      });
+      
+      const { data: { text } } = await worker.recognize(file);
+
+      // Extract data based on document type
+      const extractedData = extractDataFromOCR(text, documentType);
+      
+      // Update form data with extracted information
+      setFormData(prev => ({ ...prev, ...extractedData }));
+
+      await worker.terminate();
+
+      toast({
+        title: "OCR Processing Complete",
+        description: "Document data extracted and filled in the form",
+        variant: "default"
+      });
+
+    } catch (error) {
+      console.error('OCR processing failed:', error);
+      toast({
+        title: "OCR Processing Failed",
+        description: "Could not extract text from document. Please enter details manually.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsProcessingOCR(false);
+      setOcrProgress(0);
+    }
+  };
+
+  const extractDataFromOCR = (text: string, docType: DocumentType) => {
+    const extractedData: Record<string, string> = {};
+    const upperText = text.toUpperCase();
+
+    if (docType === 'aadhar') {
+      // Extract Aadhar number (12 digits)
+      const aadharMatch = text.match(/\b\d{4}\s?\d{4}\s?\d{4}\b/);
+      if (aadharMatch) {
+        extractedData.aadharNumber = formatAadharNumber(aadharMatch[0]);
+      }
+
+      // Extract DOB (various formats)
+      const dobMatch = text.match(/\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b/);
+      if (dobMatch) {
+        extractedData.dob = dobMatch[1].replace(/\//g, '-');
+      }
+
+      // Extract name (typically after "Name:" or similar)
+      const nameMatch = text.match(/(?:Name|नाम)[:\s]*([A-Za-z\s]+)/i);
+      if (nameMatch) {
+        extractedData.fullName = nameMatch[1].trim();
+      }
+
+      // Extract pincode
+      const pincodeMatch = text.match(/\b\d{6}\b/);
+      if (pincodeMatch) {
+        extractedData.pincode = pincodeMatch[0];
+      }
+    }
+
+    if (docType === 'pan') {
+      // Extract PAN number (format: ABCDE1234F)
+      const panMatch = text.match(/\b[A-Z]{5}\d{4}[A-Z]\b/);
+      if (panMatch) {
+        extractedData.panNumber = panMatch[0];
+      }
+
+      // Extract name
+      const nameMatch = text.match(/(?:Name|नाम)[:\s]*([A-Za-z\s]+)/i);
+      if (nameMatch) {
+        extractedData.fullName = nameMatch[1].trim();
+      }
+
+      // Extract father's name
+      const fatherMatch = text.match(/(?:Father|पिता|Father's Name)[:\s]*([A-Za-z\s]+)/i);
+      if (fatherMatch) {
+        extractedData.fatherName = fatherMatch[1].trim();
+      }
+
+      // Extract DOB
+      const dobMatch = text.match(/\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b/);
+      if (dobMatch) {
+        extractedData.dob = dobMatch[1].replace(/\//g, '-');
+      }
+    }
+
+    if (docType === 'marksheet') {
+      // Extract roll number
+      const rollMatch = text.match(/(?:Roll|रोल)[:\s]*(\w+)/i);
+      if (rollMatch) {
+        extractedData.rollNumber = rollMatch[1];
+      }
+
+      // Extract student name
+      const nameMatch = text.match(/(?:Name|नाम|Student)[:\s]*([A-Za-z\s]+)/i);
+      if (nameMatch) {
+        extractedData.studentName = nameMatch[1].trim();
+      }
+
+      // Extract school name
+      const schoolMatch = text.match(/(?:School|विद्यालय)[:\s]*([A-Za-z\s]+)/i);
+      if (schoolMatch) {
+        extractedData.schoolName = schoolMatch[1].trim();
+      }
+
+      // Extract year
+      const yearMatch = text.match(/\b(20\d{2})\b/);
+      if (yearMatch) {
+        extractedData.passingYear = yearMatch[1];
+      }
+
+      // Extract percentage/CGPA
+      const percentageMatch = text.match(/(\d+\.?\d*)\s*%/);
+      const cgpaMatch = text.match(/(\d+\.?\d*)\s*CGPA/i);
+      if (percentageMatch) {
+        extractedData.percentage = percentageMatch[1] + '%';
+      } else if (cgpaMatch) {
+        extractedData.percentage = cgpaMatch[1] + ' CGPA';
+      }
+    }
+
+    return extractedData;
   };
 
   const getStatusIcon = (status: string) => {
@@ -202,6 +380,86 @@ const DocumentVerification = () => {
             </Select>
           </CardContent>
         </Card>
+
+        {/* File Upload Section */}
+        {documentType && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Upload className="h-5 w-5" />
+                Upload Document (Optional)
+              </CardTitle>
+              <CardDescription>
+                Upload an image or PDF of your document for automatic data extraction
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-center w-full">
+                <label
+                  htmlFor="file-upload"
+                  className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-muted-foreground/25 rounded-lg cursor-pointer hover:border-primary/50 transition-colors duration-200 bg-muted/10 hover:bg-muted/20"
+                >
+                  <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                    <FileImage className="w-8 h-8 mb-2 text-muted-foreground" />
+                    <p className="mb-2 text-sm text-muted-foreground">
+                      <span className="font-semibold">Click to upload</span> or drag and drop
+                    </p>
+                    <p className="text-xs text-muted-foreground">JPG, PNG or PDF (MAX. 10MB)</p>
+                  </div>
+                  <input
+                    id="file-upload"
+                    type="file"
+                    className="hidden"
+                    accept="image/*,.pdf"
+                    onChange={handleFileUpload}
+                    disabled={isProcessingOCR}
+                  />
+                </label>
+              </div>
+
+              {uploadedFile && (
+                <div className="border rounded-lg p-4 bg-muted/5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <FileText className="h-5 w-5 text-primary" />
+                      <div>
+                        <p className="text-sm font-medium">{uploadedFile.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {(uploadedFile.size / 1024 / 1024).toFixed(2)} MB
+                        </p>
+                      </div>
+                    </div>
+                    {previewUrl && uploadedFile.type.startsWith('image/') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => window.open(previewUrl, '_blank')}
+                      >
+                        <Eye className="h-4 w-4 mr-1" />
+                        Preview
+                      </Button>
+                    )}
+                  </div>
+                  
+                  {isProcessingOCR && (
+                    <div className="mt-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span className="text-sm">Processing document... {ocrProgress}%</span>
+                      </div>
+                      <div className="w-full bg-muted rounded-full h-2">
+                        <div
+                          className="bg-primary h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${ocrProgress}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Document Details Form */}
         {documentType && (

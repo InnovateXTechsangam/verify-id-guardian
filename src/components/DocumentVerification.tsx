@@ -115,6 +115,13 @@ const DocumentVerification = () => {
   const formatPanNumber = (value: string) => {
     return value.toUpperCase().slice(0, 10);
   };
+  const normalizeLoose = (s?: string) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const equalsLoose = (a?: string, b?: string) => normalizeLoose(a) === normalizeLoose(b);
+  const equalsGrade = (a?: string, b?: string) => {
+    const na = (a || '').toLowerCase().replace(/[^0-9a-z]/g, '').replace('th', '');
+    const nb = (b || '').toLowerCase().replace(/[^0-9a-z]/g, '').replace('th', '');
+    return na === nb;
+  };
 
   const validateForm = () => {
     const fields = documentFields[documentType as keyof typeof documentFields];
@@ -130,7 +137,6 @@ const DocumentVerification = () => {
     }
     return true;
   };
-
   const simulateVerification = async () => {
     // Simulate API call
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -165,14 +171,13 @@ const DocumentVerification = () => {
 
     const normalized = { ...formData } as Record<string, string>;
     // Normalize aadhar
-    if (normalized.aadharNumber) normalized.aadharNumber = normalized.aadharNumber.replace(/\s/g, '');
+    if (normalized.aadharNumber) normalized.aadharNumber = normalized.aadharNumber.replace(/\D/g, '');
     if (normalized.panNumber) normalized.panNumber = normalized.panNumber.toUpperCase();
     // Normalize DOB from input type="date" (YYYY-MM-DD) to DD/MM/YYYY
     if (normalized.dob && /^\d{4}-\d{2}-\d{2}$/.test(normalized.dob)) {
       const [y, m, d] = normalized.dob.split('-');
       normalized.dob = `${d}/${m}/${y}`;
     }
-
     const plausibility = () => {
       if (documentType === 'aadhar') {
         const okNum = /^(\d{12})$/.test(normalized.aadharNumber || '');
@@ -226,12 +231,14 @@ const DocumentVerification = () => {
 
       if (useDatabase) {
         let fieldStatuses: Array<{ field: string; status: 'match' | 'mismatch' | 'accepted'; expected?: string; provided?: string }> = [];
+        let recFound = false;
         if (documentType === 'aadhar') {
           const rec = AADHAR_DB.find(r => r.number === (normalized.aadharNumber || ''));
           if (!rec) { verified = false; message = 'No Aadhar match found in database'; }
           else {
+            recFound = true;
             const numberOk = rec.number === (normalized.aadharNumber || '');
-            const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
+            const nameOk = equalsLoose(rec.name, normalized.fullName);
             const dobOk = rec.dob === (normalized.dob || '');
             fieldStatuses.push(
               { field: 'Aadhar Number', status: numberOk ? 'match' : 'mismatch', expected: rec.number, provided: normalized.aadharNumber },
@@ -239,7 +246,7 @@ const DocumentVerification = () => {
               { field: 'Date of Birth', status: dobOk ? 'match' : 'mismatch', expected: rec.dob, provided: normalized.dob },
               { field: 'Pincode', status: 'accepted' }
             );
-            verified = nameOk && dobOk;
+            verified = numberOk && nameOk && dobOk;
             const nonDb = getNonDbFieldsForDoc('aadhar', rec);
             if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
             extraDetails.fieldStatuses = fieldStatuses;
@@ -252,8 +259,9 @@ const DocumentVerification = () => {
           const rec = PAN_DB.find(r => r.number === (normalized.panNumber || ''));
           if (!rec) { verified = false; message = 'No PAN match found in database'; }
           else {
+            recFound = true;
             const numberOk = rec.number === (normalized.panNumber || '');
-            const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
+            const nameOk = equalsLoose(rec.name, normalized.fullName);
             const dobOk = rec.dob === (normalized.dob || '');
             fieldStatuses.push(
               { field: 'PAN Number', status: numberOk ? 'match' : 'mismatch', expected: rec.number, provided: normalized.panNumber },
@@ -261,7 +269,7 @@ const DocumentVerification = () => {
               { field: "Father's Name", status: 'accepted' },
               { field: 'Date of Birth', status: dobOk ? 'match' : 'mismatch', expected: rec.dob, provided: normalized.dob }
             );
-            verified = nameOk && dobOk;
+            verified = numberOk && nameOk && dobOk;
             const nonDb = getNonDbFieldsForDoc('pan', rec);
             if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
             extraDetails.fieldStatuses = fieldStatuses;
@@ -276,10 +284,11 @@ const DocumentVerification = () => {
           const rec = list.find(r => r.roll === (normalized.rollNumber || '') || r.name.toLowerCase() === (normalized.studentName || '').toLowerCase());
           if (!rec) { verified = false; message = 'No marksheet match found in database'; }
           else {
+            recFound = true;
             const rollOk = rec.roll === (normalized.rollNumber || '');
-            const nameOk = rec.name.toLowerCase() === (normalized.studentName || '').toLowerCase();
-            const boardOk = rec.board.toLowerCase().includes((normalized.board || '').toLowerCase().slice(0, 6));
-            const gradeOk = rec.grade === (normalized.class || '');
+            const nameOk = equalsLoose(rec.name, normalized.studentName);
+            const boardOk = equalsLoose(rec.board, normalized.board) || rec.board.toLowerCase().includes((normalized.board || '').toLowerCase().slice(0, 6));
+            const gradeOk = equalsGrade(rec.grade, normalized.class);
             fieldStatuses.push(
               { field: 'Roll Number', status: rollOk ? 'match' : 'mismatch', expected: rec.roll, provided: normalized.rollNumber },
               { field: 'Student Name', status: nameOk ? 'match' : 'mismatch', expected: rec.name, provided: normalized.studentName },
@@ -289,7 +298,7 @@ const DocumentVerification = () => {
               { field: 'Passing Year', status: 'accepted' },
               { field: 'Percentage/CGPA', status: 'accepted' }
             );
-            verified = (rollOk || nameOk) && boardOk && gradeOk;
+            verified = rollOk && nameOk && boardOk && gradeOk;
             const nonDb = getNonDbFieldsForDoc('marksheet', rec);
             if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
             if (subjects.length > 0) {
@@ -301,15 +310,14 @@ const DocumentVerification = () => {
             message = verified ? (nonDb.length ? `Matched with database (basics); accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database (basics)') : `Marksheet details do not match database${(extraDetails.mismatchedFields as string[]).length ? ` (mismatch: ${(extraDetails.mismatchedFields as string[]).join(', ')})` : ''}`;
           }
         }
-        if (!verified && geminiApiKey && uploadedFile) {
-          // Fall back to AI plausibility if DB is partial/missing
+        if (!verified && !recFound && geminiApiKey && uploadedFile) {
+          // Fall back to AI plausibility only when no record exists
           verified = plausibility();
           if (verified && documentType === 'marksheet' && subjects.length === 0) {
-            // If we don't have subjects, try to ensure percentage looks fine
             const pct = parseFloat((normalized.percentage || '').replace(/%/g, ''));
             verified = !isNaN(pct) && pct >= 0 && pct <= 100;
           }
-          if (verified) message = 'Verified via AI plausibility (partial DB)';
+          if (verified) message = 'Verified via AI plausibility (no DB record)';
         }
       } else {
         verified = plausibility();

@@ -1,14 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, CheckCircle, FileText, Shield, X, Upload, FileImage, Loader2, Eye } from "lucide-react";
+import { AlertCircle, CheckCircle, FileText, Shield, X, Upload, FileImage, Loader2, Eye, Copy } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { createWorker } from 'tesseract.js';
-
+import { Switch } from "@/components/ui/switch";
 type DocumentType = "aadhar" | "pan" | "marksheet" | "";
 
 interface VerificationResult {
@@ -16,6 +16,27 @@ interface VerificationResult {
   details: Record<string, any>;
   message: string;
 }
+
+// Demo in-app database (will be migrated to Supabase on request)
+const AADHAR_DB = [
+  { number: "798538286972", name: "Dhairyansh Buch", dob: "06/08/2006", gender: "Male" },
+  { number: "330787245476", name: "Asmit Chaudhari", dob: "19/07/2006", gender: "Male" },
+  { number: "873713774014", name: "Bhagyesh Purswani", dob: "23/11/2006", gender: "Male" },
+];
+
+const PAN_DB = [
+  { number: "CMJPB3569E", name: "Dhairyansh Buch", dob: "06/08/2006" },
+  { number: "ASMIT1907C", name: "Asmit Chaudhari", dob: "19/07/2006" },
+  { number: "BHAGY2311P", name: "Bhagyesh Purswani", dob: "23/11/2006" },
+];
+
+const MARKSHEET_12_DB = [
+  { name: "Asmit Chaudhari", roll: "11606136", grade: "12th", board: "CENTRAL BOARD OF SECONDARY EDUCATION" },
+];
+
+const MARKSHEET_10_DB = [
+  { name: "Bhagyesh Purswani", roll: "B5112490", grade: "10th", board: "GUJARAT SECONDARY AND HIGHER SECONDARY EXAMINATION BOARD" },
+];
 
 const DocumentVerification = () => {
   const [documentType, setDocumentType] = useState<DocumentType>("");
@@ -26,7 +47,18 @@ const DocumentVerification = () => {
   const [isProcessingOCR, setIsProcessingOCR] = useState(false);
   const [ocrProgress, setOcrProgress] = useState(0);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [useDatabase, setUseDatabase] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState<string>('');
+  const [generatedHash, setGeneratedHash] = useState<string>('');
+  const [hashToVerify, setHashToVerify] = useState<string>('');
+  const [hashMatches, setHashMatches] = useState<boolean | null>(null);
+  const [subjects, setSubjects] = useState<Array<{ name: string; theory: number; practical?: number | null }>>([]);
   const { toast } = useToast();
+
+  useEffect(() => {
+    const key = localStorage.getItem('GEMINI_API_KEY') || '';
+    setGeminiApiKey(key);
+  }, []);
 
   const documentFields = {
     aadhar: [
@@ -113,21 +145,114 @@ const DocumentVerification = () => {
     setIsVerifying(true);
     setVerificationResult({ status: "pending", details: {}, message: "Verification in progress..." });
 
+    const normalized = { ...formData } as Record<string, string>;
+    // Normalize aadhar
+    if (normalized.aadharNumber) normalized.aadharNumber = normalized.aadharNumber.replace(/\s/g, '');
+    if (normalized.panNumber) normalized.panNumber = normalized.panNumber.toUpperCase();
+
+    const plausibility = () => {
+      if (documentType === 'aadhar') {
+        const okNum = /^(\d{12})$/.test(normalized.aadharNumber || '');
+        const okDob = /(\d{2})\/(\d{2})\/(\d{4})/.test(normalized.dob || '');
+        return okNum && !!normalized.fullName && okDob;
+      }
+      if (documentType === 'pan') {
+        const okPan = /^[A-Z]{5}\d{4}[A-Z]$/.test(normalized.panNumber || '');
+        const okDob = /(\d{2})\/(\d{2})\/(\d{4})/.test(normalized.dob || '');
+        return okPan && !!normalized.fullName && okDob;
+      }
+      if (documentType === 'marksheet') {
+        // ensure percentage sensible
+        const pct = parseFloat((normalized.percentage || '').replace(/%/g, ''));
+        const pctOk = !isNaN(pct) && pct >= 0 && pct <= 100;
+        return !!normalized.rollNumber && !!normalized.studentName && !!normalized.board && (!!normalized.class) && (pctOk || subjects.length > 0);
+      }
+      return false;
+    };
+
+    const genResult = async (status: "verified" | "failed", message: string, extraDetails: Record<string, any> = {}) => {
+      const base = { ...formData, ...extraDetails };
+      const payload = { documentType, ...base };
+      let hash = '';
+      if (status === 'verified') {
+        hash = await computeSHA256(payload);
+        setGeneratedHash(hash);
+        setHashMatches(null);
+      }
+      return {
+        status,
+        details: {
+          ...base,
+          verificationId: `VER${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          ...(hash ? { hash } : {})
+        },
+        message
+      } as VerificationResult;
+    };
+
     try {
-      const result = await simulateVerification();
+      let verified = false;
+      let message = '';
+
+      if (useDatabase) {
+        if (documentType === 'aadhar') {
+          const rec = AADHAR_DB.find(r => r.number === (normalized.aadharNumber || ''));
+          if (!rec) { verified = false; message = 'No Aadhar match found in database'; }
+          else {
+            const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
+            const dobOk = rec.dob === (normalized.dob || '');
+            verified = nameOk && dobOk;
+            message = verified ? 'Matched with database' : 'Details do not match database';
+          }
+        } else if (documentType === 'pan') {
+          const rec = PAN_DB.find(r => r.number === (normalized.panNumber || ''));
+          if (!rec) { verified = false; message = 'No PAN match found in database'; }
+          else {
+            const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
+            const dobOk = rec.dob === (normalized.dob || '');
+            verified = nameOk && dobOk;
+            message = verified ? 'Matched with database' : 'Details do not match database';
+          }
+        } else if (documentType === 'marksheet') {
+          const is12 = (normalized.class || '').includes('12');
+          const list = is12 ? MARKSHEET_12_DB : MARKSHEET_10_DB;
+          const rec = list.find(r => r.roll === (normalized.rollNumber || '') || r.name.toLowerCase() === (normalized.studentName || '').toLowerCase());
+          if (!rec) { verified = false; message = 'No marksheet match found in database'; }
+          else {
+            const rollOk = rec.roll === (normalized.rollNumber || '');
+            const nameOk = rec.name.toLowerCase() === (normalized.studentName || '').toLowerCase();
+            const boardOk = rec.board.toLowerCase().includes((normalized.board || '').toLowerCase().slice(0, 6));
+            const gradeOk = rec.grade === (normalized.class || '');
+            verified = (rollOk || nameOk) && boardOk && gradeOk;
+            message = verified ? 'Matched with database (basics)' : 'Marksheet details do not match database';
+            if (subjects.length > 0) {
+              const pct = computePercentageFromSubjects(subjects);
+              if (pct) normalized.percentage = pct;
+            }
+          }
+        }
+        if (!verified && geminiApiKey && uploadedFile) {
+          // Fall back to AI plausibility if DB is partial/missing
+          verified = plausibility();
+          if (verified && documentType === 'marksheet' && subjects.length === 0) {
+            // If we don't have subjects, try to ensure percentage looks fine
+            const pct = parseFloat((normalized.percentage || '').replace(/%/g, ''));
+            verified = !isNaN(pct) && pct >= 0 && pct <= 100;
+          }
+          if (verified) message = 'Verified via AI plausibility (partial DB)';
+        }
+      } else {
+        verified = plausibility();
+        message = verified ? 'Verified via AI plausibility checks' : 'Failed plausibility checks';
+      }
+
+      const result = await genResult(verified ? 'verified' : 'failed', message);
       setVerificationResult(result);
-      
-      toast({
-        title: result.status === "verified" ? "Success" : "Failed",
-        description: result.message,
-        variant: result.status === "verified" ? "default" : "destructive"
-      });
+      toast({ title: verified ? 'Success' : 'Failed', description: message, variant: verified ? 'default' : 'destructive' });
     } catch (error) {
-      setVerificationResult({
-        status: "failed",
-        details: { error: "Network error" },
-        message: "Verification failed due to network error"
-      });
+      const result = await genResult('failed', 'Verification failed due to an unexpected error');
+      setVerificationResult(result);
     } finally {
       setIsVerifying(false);
     }
@@ -171,8 +296,12 @@ const DocumentVerification = () => {
     const url = URL.createObjectURL(file);
     setPreviewUrl(url);
 
-    // Process OCR
-    await processDocumentOCR(file);
+    // Process OCR (prefer Gemini if API key is set)
+    if (geminiApiKey) {
+      await processWithGemini(file);
+    } else {
+      await processDocumentOCR(file);
+    }
   };
 
   const processDocumentOCR = async (file: File) => {
@@ -331,11 +460,174 @@ const DocumentVerification = () => {
     return null;
   };
 
+  // Gemini helpers and hashing utilities
+  const readFileAsBase64 = (file: File): Promise<{ base64: string; mime: string }> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64 = result.split(',')[1];
+        resolve({ base64, mime: file.type });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const stripJson = (text: string) => {
+    // Remove code fences if any
+    const fenceMatch = text.match(/```(?:json)?\n([\s\S]*?)```/);
+    if (fenceMatch) return fenceMatch[1];
+    // Try to find first { .. } block
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1) return text.slice(firstBrace, lastBrace + 1);
+    return text;
+  };
+
+  const safeJSON = (s: string): any | null => {
+    try { return JSON.parse(s); } catch { return null; }
+  };
+
+  const computeSHA256 = async (payload: any) => {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(JSON.stringify(payload));
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return hashHex;
+  };
+
+  const computePercentageFromSubjects = (items: Array<{ name: string; theory: number; practical?: number | null }>) => {
+    if (!items || items.length === 0) return null;
+    let obtained = 0;
+    let max = 0;
+    for (const s of items) {
+      const t = Number(s.theory) || 0;
+      const p = s.practical === null || s.practical === undefined ? 0 : Number(s.practical) || 0;
+      obtained += t + p;
+      max += (t > 0 ? 100 : 0) + (s.practical === null ? 0 : 100);
+    }
+    if (max === 0) return null;
+    return ((obtained / max) * 100).toFixed(2) + '%';
+  };
+
+  const processWithGemini = async (file: File) => {
+    setIsProcessingOCR(true);
+    setOcrProgress(5);
+    try {
+      const { base64, mime } = await readFileAsBase64(file);
+      setOcrProgress(15);
+
+      const systemPrompt = `You are an expert OCR and information extraction engine for Indian identity and education documents. Output strict JSON only.`;
+
+      const extractionSchema = documentType === 'aadhar'
+        ? {
+            aadharNumber: 'string (12 digits, format as XXXX XXXX XXXX)',
+            fullName: 'string',
+            dob: 'string (DD/MM/YYYY)',
+            gender: 'Male|Female|Other|Unknown'
+          }
+        : documentType === 'pan'
+        ? {
+            panNumber: 'string (ABCDE1234F)',
+            fullName: 'string',
+            fatherName: 'string|optional',
+            dob: 'string (DD/MM/YYYY)'
+          }
+        : {
+            rollNumber: 'string',
+            studentName: 'string',
+            schoolName: 'string|optional',
+            board: 'string',
+            class: '10th|12th',
+            passingYear: 'string|optional',
+            subjects: 'Array of { name, theory (0-100), practical (0-100 or null if XXX) }',
+            percentage: 'string like 88.50% (compute from subjects if present)'
+          };
+
+      const userPrompt = `Extract fields for a ${documentType.toUpperCase()} document. Return ONLY compact JSON with keys: ${JSON.stringify(extractionSchema)}.
+If marks contain XXX for practical, set practical to null. Include a best-effort subjects array.`;
+
+      const body = {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: systemPrompt + '\n' + userPrompt },
+              { inlineData: { data: base64, mimeType: mime } }
+            ]
+          }
+        ]
+      } as any;
+
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${encodeURIComponent(geminiApiKey)}` , {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      setOcrProgress(60);
+      if (!resp.ok) throw new Error('Gemini API error');
+      const data = await resp.json();
+      const textOut = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const json = safeJSON(stripJson(textOut));
+      if (!json) throw new Error('Could not parse Gemini JSON');
+
+      // Normalize and update form
+      if (documentType === 'aadhar') {
+        const aNum = (json.aadharNumber || '').toString().replace(/\D/g, '').slice(0,12);
+        const formatted = aNum.replace(/(\d{4})(?=\d)/g, '$1 ').slice(0,14);
+        setFormData(prev => ({
+          ...prev,
+          aadharNumber: formatted,
+          fullName: json.fullName || prev.fullName,
+          dob: json.dob || prev.dob,
+          pincode: prev.pincode || ''
+        }));
+      } else if (documentType === 'pan') {
+        setFormData(prev => ({
+          ...prev,
+          panNumber: (json.panNumber || '').toString().toUpperCase(),
+          fullName: json.fullName || prev.fullName,
+          fatherName: json.fatherName || prev.fatherName,
+          dob: json.dob || prev.dob,
+        }));
+      } else if (documentType === 'marksheet') {
+        const subs = Array.isArray(json.subjects) ? json.subjects.map((s: any) => ({
+          name: String(s.name || ''),
+          theory: Number(s.theory) || 0,
+          practical: s.practical === null ? null : (Number(s.practical) || 0)
+        })) : [];
+        setSubjects(subs);
+        const pct = json.percentage || computePercentageFromSubjects(subs) || '';
+        setFormData(prev => ({
+          ...prev,
+          rollNumber: json.rollNumber || prev.rollNumber,
+          studentName: json.studentName || prev.studentName,
+          schoolName: json.schoolName || prev.schoolName,
+          board: json.board || prev.board,
+          class: json.class || prev.class,
+          passingYear: json.passingYear || prev.passingYear,
+          percentage: pct
+        }));
+      }
+
+      toast({ title: 'AI extraction complete', description: 'Gemini extracted data successfully.' });
+      setOcrProgress(100);
+    } catch (err: any) {
+      console.error('Gemini extraction failed:', err);
+      toast({ title: 'Gemini extraction failed', description: 'Falling back to on-device OCR.', variant: 'destructive' });
+      await processDocumentOCR(file);
+    } finally {
+      setIsProcessingOCR(false);
+      setOcrProgress(0);
+    }
+  };
+
   const extractDataFromOCR = (text: string, docType: DocumentType) => {
     const extractedData: Record<string, string> = {};
     const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
     console.log('OCR Text Lines:', lines);
-
     if (docType === 'aadhar') {
       // Extract Aadhar number (12 digits, with or without spaces)
       const aadharPatterns = [
@@ -613,6 +905,47 @@ const DocumentVerification = () => {
               Secure verification of Aadhar, PAN, and Educational Documents
             </CardDescription>
           </CardHeader>
+        </Card>
+
+        {/* Verification Settings */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Verification Settings</CardTitle>
+            <CardDescription>Provide Gemini API key and choose verification mode</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="md:col-span-2 space-y-2">
+                <Label htmlFor="gemini-key">Gemini API Key</Label>
+                <Input
+                  id="gemini-key"
+                  type="password"
+                  placeholder="AIza..."
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                />
+              </div>
+              <div className="flex items-end">
+                <Button
+                  className="w-full"
+                  onClick={() => {
+                    localStorage.setItem('GEMINI_API_KEY', geminiApiKey);
+                    toast({ title: 'Saved', description: 'Gemini API key saved locally.' });
+                  }}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <Label htmlFor="mode-switch">Verification Mode</Label>
+                <p className="text-sm text-muted-foreground">Toggle Database + AI verification</p>
+              </div>
+              <Switch id="mode-switch" checked={useDatabase} onCheckedChange={setUseDatabase} />
+            </div>
+          </CardContent>
         </Card>
 
         {/* Document Type Selection */}

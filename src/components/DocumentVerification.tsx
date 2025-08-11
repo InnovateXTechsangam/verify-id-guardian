@@ -84,6 +84,24 @@ const DocumentVerification = () => {
     ]
   };
 
+  // Fields present in our in-app DB vs form fields
+  const DB_FIELD_MAP = {
+    aadhar: { aadharNumber: 'number', fullName: 'name', dob: 'dob', pincode: null },
+    pan: { panNumber: 'number', fullName: 'name', fatherName: null, dob: 'dob' },
+    marksheet: { rollNumber: 'roll', studentName: 'name', schoolName: null, board: 'board', class: 'grade', passingYear: null, percentage: null }
+  } as const;
+
+  const getNonDbFieldsForDoc = (doc: DocumentType, rec: any) => {
+    const map = DB_FIELD_MAP[doc as keyof typeof DB_FIELD_MAP] as any;
+    if (!map) return [] as string[];
+    const out: string[] = [];
+    for (const k of Object.keys(map)) {
+      const dbKey = (map as any)[k];
+      if (!dbKey || !(rec && dbKey in rec)) out.push(k);
+    }
+    return out;
+  };
+
   const handleInputChange = (key: string, value: string) => {
     setFormData(prev => ({ ...prev, [key]: value }));
   };
@@ -199,6 +217,7 @@ const DocumentVerification = () => {
     try {
       let verified = false;
       let message = '';
+      let extraDetails: Record<string, any> = {};
 
       if (useDatabase) {
         if (documentType === 'aadhar') {
@@ -208,7 +227,11 @@ const DocumentVerification = () => {
             const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
             const dobOk = rec.dob === (normalized.dob || '');
             verified = nameOk && dobOk;
-            message = verified ? 'Matched with database' : 'Details do not match database';
+            const nonDb = getNonDbFieldsForDoc('aadhar', rec);
+            if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
+            message = verified
+              ? (nonDb.length ? `Matched with database; accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database')
+              : 'Details do not match database';
           }
         } else if (documentType === 'pan') {
           const rec = PAN_DB.find(r => r.number === (normalized.panNumber || ''));
@@ -217,7 +240,11 @@ const DocumentVerification = () => {
             const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
             const dobOk = rec.dob === (normalized.dob || '');
             verified = nameOk && dobOk;
-            message = verified ? 'Matched with database' : 'Details do not match database';
+            const nonDb = getNonDbFieldsForDoc('pan', rec);
+            if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
+            message = verified
+              ? (nonDb.length ? `Matched with database; accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database')
+              : 'Details do not match database';
           }
         } else if (documentType === 'marksheet') {
           const is12 = (normalized.class || '').includes('12');
@@ -230,7 +257,9 @@ const DocumentVerification = () => {
             const boardOk = rec.board.toLowerCase().includes((normalized.board || '').toLowerCase().slice(0, 6));
             const gradeOk = rec.grade === (normalized.class || '');
             verified = (rollOk || nameOk) && boardOk && gradeOk;
-            message = verified ? 'Matched with database (basics)' : 'Marksheet details do not match database';
+            const nonDb = getNonDbFieldsForDoc('marksheet', rec);
+            if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
+            message = verified ? (nonDb.length ? `Matched with database (basics); accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database (basics)') : 'Marksheet details do not match database';
             if (subjects.length > 0) {
               const pct = computePercentageFromSubjects(subjects);
               if (pct) normalized.percentage = pct;
@@ -252,7 +281,7 @@ const DocumentVerification = () => {
         message = verified ? 'Verified via AI plausibility checks' : 'Failed plausibility checks';
       }
 
-      const result = await genResult(verified ? 'verified' : 'failed', message);
+      const result = await genResult(verified ? 'verified' : 'failed', message, extraDetails);
       setVerificationResult(result);
       toast({ title: verified ? 'Success' : 'Failed', description: message, variant: verified ? 'default' : 'destructive' });
     } catch (error) {
@@ -562,7 +591,8 @@ const DocumentVerification = () => {
             aadharNumber: 'string (12 digits, format as XXXX XXXX XXXX)',
             fullName: 'string',
             dob: 'string (DD/MM/YYYY)',
-            gender: 'Male|Female|Other|Unknown'
+            gender: 'Male|Female|Other|Unknown',
+            pincode: 'string (6 digits)|optional'
           }
         : documentType === 'pan'
         ? {
@@ -1247,26 +1277,6 @@ If marks contain XXX for practical, set practical to null. Include a best-effort
           </CardContent>
         </Card>
 
-        {/* Important Notice */}
-        <Card className="bg-info/10 border-info/20">
-          <CardContent className="pt-6">
-            <div className="flex gap-3">
-              <AlertCircle className="h-5 w-5 text-info flex-shrink-0 mt-0.5" />
-              <div className="text-sm text-info-foreground">
-                <p className="font-semibold mb-1">Important Notice:</p>
-                <p>
-                  This is a demonstration interface. In a production environment, you would need to:
-                </p>
-                <ul className="list-disc list-inside mt-2 space-y-1">
-                  <li>Connect to official government APIs for real verification</li>
-                  <li>Implement proper authentication and API key management</li>
-                  <li>Add comprehensive data validation and security measures</li>
-                  <li>Ensure compliance with data protection regulations</li>
-                </ul>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
       </div>
     </div>
   );

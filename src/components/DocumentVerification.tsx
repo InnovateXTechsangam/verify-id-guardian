@@ -167,6 +167,11 @@ const DocumentVerification = () => {
     // Normalize aadhar
     if (normalized.aadharNumber) normalized.aadharNumber = normalized.aadharNumber.replace(/\s/g, '');
     if (normalized.panNumber) normalized.panNumber = normalized.panNumber.toUpperCase();
+    // Normalize DOB from input type="date" (YYYY-MM-DD) to DD/MM/YYYY
+    if (normalized.dob && /^\d{4}-\d{2}-\d{2}$/.test(normalized.dob)) {
+      const [y, m, d] = normalized.dob.split('-');
+      normalized.dob = `${d}/${m}/${y}`;
+    }
 
     const plausibility = () => {
       if (documentType === 'aadhar') {
@@ -220,31 +225,50 @@ const DocumentVerification = () => {
       let extraDetails: Record<string, any> = {};
 
       if (useDatabase) {
+        let fieldStatuses: Array<{ field: string; status: 'match' | 'mismatch' | 'accepted'; expected?: string; provided?: string }> = [];
         if (documentType === 'aadhar') {
           const rec = AADHAR_DB.find(r => r.number === (normalized.aadharNumber || ''));
           if (!rec) { verified = false; message = 'No Aadhar match found in database'; }
           else {
+            const numberOk = rec.number === (normalized.aadharNumber || '');
             const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
             const dobOk = rec.dob === (normalized.dob || '');
+            fieldStatuses.push(
+              { field: 'Aadhar Number', status: numberOk ? 'match' : 'mismatch', expected: rec.number, provided: normalized.aadharNumber },
+              { field: 'Full Name', status: nameOk ? 'match' : 'mismatch', expected: rec.name, provided: normalized.fullName },
+              { field: 'Date of Birth', status: dobOk ? 'match' : 'mismatch', expected: rec.dob, provided: normalized.dob },
+              { field: 'Pincode', status: 'accepted' }
+            );
             verified = nameOk && dobOk;
             const nonDb = getNonDbFieldsForDoc('aadhar', rec);
             if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
+            extraDetails.fieldStatuses = fieldStatuses;
+            extraDetails.mismatchedFields = fieldStatuses.filter(f => f.status === 'mismatch').map(f => f.field);
             message = verified
               ? (nonDb.length ? `Matched with database; accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database')
-              : 'Details do not match database';
+              : `Details do not match database${(extraDetails.mismatchedFields as string[]).length ? ` (mismatch: ${(extraDetails.mismatchedFields as string[]).join(', ')})` : ''}`;
           }
         } else if (documentType === 'pan') {
           const rec = PAN_DB.find(r => r.number === (normalized.panNumber || ''));
           if (!rec) { verified = false; message = 'No PAN match found in database'; }
           else {
+            const numberOk = rec.number === (normalized.panNumber || '');
             const nameOk = rec.name.toLowerCase() === (normalized.fullName || '').toLowerCase();
             const dobOk = rec.dob === (normalized.dob || '');
+            fieldStatuses.push(
+              { field: 'PAN Number', status: numberOk ? 'match' : 'mismatch', expected: rec.number, provided: normalized.panNumber },
+              { field: 'Full Name', status: nameOk ? 'match' : 'mismatch', expected: rec.name, provided: normalized.fullName },
+              { field: "Father's Name", status: 'accepted' },
+              { field: 'Date of Birth', status: dobOk ? 'match' : 'mismatch', expected: rec.dob, provided: normalized.dob }
+            );
             verified = nameOk && dobOk;
             const nonDb = getNonDbFieldsForDoc('pan', rec);
             if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
+            extraDetails.fieldStatuses = fieldStatuses;
+            extraDetails.mismatchedFields = fieldStatuses.filter(f => f.status === 'mismatch').map(f => f.field);
             message = verified
               ? (nonDb.length ? `Matched with database; accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database')
-              : 'Details do not match database';
+              : `Details do not match database${(extraDetails.mismatchedFields as string[]).length ? ` (mismatch: ${(extraDetails.mismatchedFields as string[]).join(', ')})` : ''}`;
           }
         } else if (documentType === 'marksheet') {
           const is12 = (normalized.class || '').includes('12');
@@ -256,14 +280,25 @@ const DocumentVerification = () => {
             const nameOk = rec.name.toLowerCase() === (normalized.studentName || '').toLowerCase();
             const boardOk = rec.board.toLowerCase().includes((normalized.board || '').toLowerCase().slice(0, 6));
             const gradeOk = rec.grade === (normalized.class || '');
+            fieldStatuses.push(
+              { field: 'Roll Number', status: rollOk ? 'match' : 'mismatch', expected: rec.roll, provided: normalized.rollNumber },
+              { field: 'Student Name', status: nameOk ? 'match' : 'mismatch', expected: rec.name, provided: normalized.studentName },
+              { field: 'Board', status: boardOk ? 'match' : 'mismatch', expected: rec.board, provided: normalized.board },
+              { field: 'Class', status: gradeOk ? 'match' : 'mismatch', expected: rec.grade, provided: normalized.class },
+              { field: 'School Name', status: 'accepted' },
+              { field: 'Passing Year', status: 'accepted' },
+              { field: 'Percentage/CGPA', status: 'accepted' }
+            );
             verified = (rollOk || nameOk) && boardOk && gradeOk;
             const nonDb = getNonDbFieldsForDoc('marksheet', rec);
             if (nonDb.length) extraDetails.nonDbFieldsAccepted = nonDb;
-            message = verified ? (nonDb.length ? `Matched with database (basics); accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database (basics)') : 'Marksheet details do not match database';
             if (subjects.length > 0) {
               const pct = computePercentageFromSubjects(subjects);
               if (pct) normalized.percentage = pct;
             }
+            extraDetails.fieldStatuses = fieldStatuses;
+            extraDetails.mismatchedFields = fieldStatuses.filter(f => f.status === 'mismatch').map(f => f.field);
+            message = verified ? (nonDb.length ? `Matched with database (basics); accepted non-DB fields: ${nonDb.join(', ')}.` : 'Matched with database (basics)') : `Marksheet details do not match database${(extraDetails.mismatchedFields as string[]).length ? ` (mismatch: ${(extraDetails.mismatchedFields as string[]).join(', ')})` : ''}`;
           }
         }
         if (!verified && geminiApiKey && uploadedFile) {
@@ -1193,6 +1228,27 @@ If marks contain XXX for practical, set practical to null. Include a best-effort
               <p className="text-sm text-muted-foreground mb-4">
                 {verificationResult.message}
               </p>
+
+              {Array.isArray((verificationResult as any).details?.fieldStatuses) && (verificationResult as any).details.fieldStatuses.length > 0 && (
+                <div className="bg-muted/30 p-4 rounded-lg mb-4">
+                  <h4 className="font-semibold mb-2">Field checks</h4>
+                  <div className="grid gap-2 text-sm">
+                    {(verificationResult as any).details.fieldStatuses.map((s: any, idx: number) => (
+                      <div key={idx} className="flex items-center justify-between">
+                        <span className="text-muted-foreground">{s.field}</span>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={s.status === 'match' ? 'default' : s.status === 'mismatch' ? 'destructive' : 'secondary'}>
+                            {s.status}
+                          </Badge>
+                          {s.status === 'mismatch' && s.expected && (
+                            <span className="text-xs text-muted-foreground">expected: {s.expected}, got: {s.provided}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               
               {verificationResult.status === "verified" && (
                 <div className="bg-muted/50 p-4 rounded-lg">
@@ -1205,24 +1261,24 @@ If marks contain XXX for practical, set practical to null. Include a best-effort
                           <span className="capitalize text-muted-foreground">
                             {key.replace(/([A-Z])/g, ' $1').trim()}:
                           </span>
-                          <span className="font-medium">{value}</span>
+                          <span className="font-medium">{value as any}</span>
                         </div>
                       ))}
                     <div className="border-t pt-2 mt-2 space-y-2">
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Verification ID:</span>
-                        <span className="font-mono text-xs">{verificationResult.details.verificationId}</span>
+                        <span className="font-mono text-xs">{(verificationResult.details as any).verificationId}</span>
                       </div>
-                      {verificationResult.details.hash && (
+                      {(verificationResult.details as any).hash && (
                         <div className="flex items-center justify-between">
                           <span className="text-muted-foreground">Document Hash (SHA-256):</span>
                           <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs break-all max-w-[60ch]">{String(verificationResult.details.hash)}</span>
+                            <span className="font-mono text-xs break-all max-w-[60ch]">{String((verificationResult.details as any).hash)}</span>
                             <Button
                               size="icon"
                               variant="outline"
                               onClick={() => {
-                                navigator.clipboard.writeText(String(verificationResult.details.hash));
+                                navigator.clipboard.writeText(String((verificationResult.details as any).hash));
                                 toast({ title: 'Copied', description: 'Hash copied to clipboard.' });
                               }}
                             >

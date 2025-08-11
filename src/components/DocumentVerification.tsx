@@ -173,18 +173,23 @@ const DocumentVerification = () => {
     const genResult = async (status: "verified" | "failed", message: string, extraDetails: Record<string, any> = {}) => {
       const base = { ...formData, ...extraDetails };
       const payload = { documentType, ...base };
+      const verificationId = `VER${Date.now()}`;
+      const timestamp = new Date().toISOString();
       let hash = '';
       if (status === 'verified') {
         hash = await computeSHA256(payload);
         setGeneratedHash(hash);
         setHashMatches(null);
+        try {
+          addLedgerRecord({ hash, verificationId, timestamp, documentType, fields: base });
+        } catch {}
       }
       return {
         status,
         details: {
           ...base,
-          verificationId: `VER${Date.now()}`,
-          timestamp: new Date().toISOString(),
+          verificationId,
+          timestamp,
           ...(hash ? { hash } : {})
         },
         message
@@ -496,6 +501,37 @@ const DocumentVerification = () => {
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     return hashHex;
+  };
+
+  // Local hash ledger (stored in localStorage)
+  interface HashRecord {
+    hash: string;
+    verificationId: string;
+    timestamp: string;
+    documentType: DocumentType;
+    fields: Record<string, any>;
+  }
+
+  const LEDGER_KEY = 'VERIFICATION_LEDGER';
+  const loadLedger = (): HashRecord[] => {
+    try {
+      const raw = localStorage.getItem(LEDGER_KEY);
+      return raw ? (JSON.parse(raw) as HashRecord[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  const saveLedger = (items: HashRecord[]) => {
+    try { localStorage.setItem(LEDGER_KEY, JSON.stringify(items)); } catch {}
+  };
+  const addLedgerRecord = (rec: HashRecord) => {
+    const arr = loadLedger();
+    arr.unshift(rec);
+    saveLedger(arr);
+  };
+  const findLedgerRecord = (hash: string): HashRecord | null => {
+    if (!hash) return null;
+    return loadLedger().find(r => r.hash === hash) || null;
   };
 
   const computePercentageFromSubjects = (items: Array<{ name: string; theory: number; practical?: number | null }>) => {
@@ -1142,11 +1178,29 @@ If marks contain XXX for practical, set practical to null. Include a best-effort
                           <span className="font-medium">{value}</span>
                         </div>
                       ))}
-                    <div className="border-t pt-2 mt-2">
+                    <div className="border-t pt-2 mt-2 space-y-2">
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Verification ID:</span>
                         <span className="font-mono text-xs">{verificationResult.details.verificationId}</span>
                       </div>
+                      {verificationResult.details.hash && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-muted-foreground">Document Hash (SHA-256):</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs break-all max-w-[60ch]">{String(verificationResult.details.hash)}</span>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              onClick={() => {
+                                navigator.clipboard.writeText(String(verificationResult.details.hash));
+                                toast({ title: 'Copied', description: 'Hash copied to clipboard.' });
+                              }}
+                            >
+                              <Copy className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1154,6 +1208,44 @@ If marks contain XXX for practical, set practical to null. Include a best-effort
             </CardContent>
           </Card>
         )}
+
+        {/* Hash Verification */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Shield className="h-5 w-5" />
+              Verify a Hash
+            </CardTitle>
+            <CardDescription>Paste a previously generated SHA-256 hash to check if it's recorded locally</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex gap-2">
+              <Input
+                placeholder="Paste document hash..."
+                value={hashToVerify}
+                onChange={(e) => setHashToVerify(e.target.value.trim())}
+              />
+              <Button
+                onClick={() => {
+                  const rec = findLedgerRecord(hashToVerify);
+                  setHashMatches(!!rec);
+                  if (rec) {
+                    toast({ title: 'Hash valid', description: `Recorded on ${new Date(rec.timestamp).toLocaleString()} (${rec.documentType})` });
+                  } else {
+                    toast({ title: 'Hash not found', description: 'No matching record in local ledger.', variant: 'destructive' });
+                  }
+                }}
+              >
+                Verify Hash
+              </Button>
+            </div>
+            {hashMatches !== null && (
+              <div className={hashMatches ? "text-sm text-success" : "text-sm text-destructive"}>
+                {hashMatches ? "Hash is valid and recorded locally." : "Hash not found in local records."}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Important Notice */}
         <Card className="bg-info/10 border-info/20">

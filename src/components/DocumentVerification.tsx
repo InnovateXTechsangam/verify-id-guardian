@@ -1255,7 +1255,7 @@ If marks contain XXX for practical, set practical to null. Include a best-effort
                   <h4 className="font-semibold mb-2">Verified Details:</h4>
                   <div className="grid gap-2 text-sm">
                     {Object.entries(verificationResult.details)
-                      .filter(([key]) => !["verificationId", "timestamp"].includes(key))
+                      .filter(([key, value]) => !["verificationId", "timestamp", "fieldStatuses"].includes(key) && typeof value !== 'object')
                       .map(([key, value]) => (
                         <div key={key} className="flex justify-between">
                           <span className="capitalize text-muted-foreground">
